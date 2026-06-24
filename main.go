@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -30,7 +31,7 @@ func (b *Broker) getCreateQueue(name string) chan string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	ch = make(chan string, 10) // for example 100
+	ch = make(chan string, 10) // for example 10
 	b.queues[name] = ch
 	return ch
 }
@@ -45,6 +46,7 @@ func main() {
 	broker := NewBroker()
 
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("PUT /{queue}", func(w http.ResponseWriter, r *http.Request) {
 		queueName := r.PathValue("queue")
 		message := r.FormValue("v")
@@ -66,23 +68,37 @@ func main() {
 	mux.HandleFunc("GET /{queue}", func(w http.ResponseWriter, r *http.Request) {
 		queueName := r.PathValue("queue")
 		timeoutValue := r.FormValue("timeout")
+
+		ch := broker.getCreateQueue(queueName)
+
+		if timeoutValue == "" {
+			select {
+			case message := <-ch:
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(message))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+			return
+		}
+
 		timeout, err := strconv.Atoi(timeoutValue)
 		if err != nil {
 			slog.Error("convert", "err", err)
+			http.Error(w, "invalid timeout", http.StatusBadRequest)
 			return
 		}
-		ticker := time.NewTicker(time.Second)
-		stop := time.After(time.Duration(timeout) * time.Second)
-		defer ticker.Stop()
 
-		ch := broker.getCreateQueue(queueName)
+		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeout)*time.Second)
+		defer cancel()
 
 		select {
 		case message := <-ch:
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(message))
-		case <-stop:
+			_, _ = w.Write([]byte(message))
+		case <-ctx.Done():
 			w.WriteHeader(http.StatusNotFound)
 		}
 
