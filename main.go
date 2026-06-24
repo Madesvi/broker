@@ -28,7 +28,7 @@ func (b *Broker) getCreateQueue(name string) chan string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	ch = make(chan string, 100) // for example 100
+	ch = make(chan string, 10) // for example 100
 	b.queues[name] = ch
 	return ch
 }
@@ -53,20 +53,29 @@ func main() {
 		}
 
 		ch := broker.getCreateQueue(queueName)
-		ch <- message
 
-		w.WriteHeader(http.StatusOK)
+		select {
+		case ch <- message:
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "queue is full", http.StatusServiceUnavailable)
+		}
 	})
 	mux.HandleFunc("GET /{queue}", func(w http.ResponseWriter, r *http.Request) {
 		queueName := r.PathValue("queue")
+		timer := r.FormValue("timeout")
+		fmt.Println(timer)
 
 		ch := broker.getCreateQueue(queueName)
 
-		message := <-ch
-
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(message))
+		select {
+		case message := <-ch:
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(message))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
 
 	})
 
@@ -76,3 +85,11 @@ func main() {
 		slog.Error("starting server", "err", err)
 	}
 }
+
+// test terminal
+// curl -i -X PUT "http://localhost:7777/pet?v=snake"
+// curl -i -X PUT "http://localhost:7777/pet?v=dog"
+// curl -i -X PUT "http://localhost:7777/role?v=admin"
+// curl -i -X PUT "http://localhost:7777/role?v=manager"
+// curl -i -X GET "http://localhost:7777/pet"
+// curl -i -X GET "http://localhost:7777/role"
