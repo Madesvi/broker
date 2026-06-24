@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
+	"time"
 )
 
 type Broker struct {
@@ -63,8 +65,15 @@ func main() {
 	})
 	mux.HandleFunc("GET /{queue}", func(w http.ResponseWriter, r *http.Request) {
 		queueName := r.PathValue("queue")
-		timer := r.FormValue("timeout")
-		fmt.Println(timer)
+		timeoutValue := r.FormValue("timeout")
+		timeout, err := strconv.Atoi(timeoutValue)
+		if err != nil {
+			slog.Error("convert", "err", err)
+			return
+		}
+		ticker := time.NewTicker(time.Second)
+		stop := time.After(time.Duration(timeout) * time.Second)
+		defer ticker.Stop()
 
 		ch := broker.getCreateQueue(queueName)
 
@@ -73,7 +82,7 @@ func main() {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(message))
-		default:
+		case <-stop:
 			w.WriteHeader(http.StatusNotFound)
 		}
 
