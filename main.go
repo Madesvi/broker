@@ -33,15 +33,6 @@ func (b *Broker) getCreateQueue(name string) chan string {
 	return ch
 }
 
-func getMessageFromBroker(w http.ResponseWriter, r *http.Request) {
-	queueName := r.PathValue("queue")
-
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(queueName))
-
-}
-
 func main() {
 	defaultPort := "3000"
 	portFlag := flag.String("port", defaultPort, "Port to run server")
@@ -64,15 +55,20 @@ func main() {
 		ch := broker.getCreateQueue(queueName)
 		ch <- message
 
-		go func() {
-			for message := range ch {
-				fmt.Println(message)
-			}
-		}()
-
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("GET /{queue}", getMessageFromBroker)
+	mux.HandleFunc("GET /{queue}", func(w http.ResponseWriter, r *http.Request) {
+		queueName := r.PathValue("queue")
+
+		ch := broker.getCreateQueue(queueName)
+
+		message := <-ch
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(message))
+
+	})
 
 	fmt.Printf("Server starting on %s\n", port)
 	err := http.ListenAndServe(port, mux)
