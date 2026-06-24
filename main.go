@@ -27,7 +27,7 @@ func NewBroker() *Broker {
 	return &Broker{queues: make(map[string]*Queue)}
 }
 
-func (b *Broker) getCreateQueue(name string) *Queue {
+func (b *Broker) getOrCreateQueue(name string) *Queue {
 	b.mu.RLock()
 	q, ok := b.queues[name] // check exists channel
 	b.mu.RUnlock()
@@ -74,7 +74,7 @@ func main() {
 			return
 		}
 
-		q := broker.getCreateQueue(queueName)
+		q := broker.getOrCreateQueue(queueName)
 
 		q.mu.Lock()
 
@@ -110,7 +110,7 @@ func main() {
 			return
 		}
 
-		q := broker.getCreateQueue(queueName)
+		q := broker.getOrCreateQueue(queueName)
 
 		q.mu.Lock()
 
