@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/list"
 	"context"
 	"flag"
 	"fmt"
@@ -11,30 +12,47 @@ import (
 	"time"
 )
 
+type Queue struct {
+	mu       sync.Mutex
+	messages *list.List
+	waiters  *list.List
+}
+
 type Broker struct {
 	mu     sync.RWMutex
-	queues map[string]chan string
+	queues map[string]*Queue
 }
 
 func NewBroker() *Broker {
-	return &Broker{queues: make(map[string]chan string)}
+	return &Broker{queues: make(map[string]*Queue)}
 }
 
-func (b *Broker) getCreateQueue(name string) chan string {
+func (b *Broker) getCreateQueue(name string) *Queue {
 	b.mu.RLock()
-	ch, ok := b.queues[name] // check exists channel
+	q, ok := b.queues[name] // check exists channel
 	b.mu.RUnlock()
 	if ok {
-		return ch
+		return q
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	ch = make(chan string, 10) // for example 10
-	b.queues[name] = ch
-	return ch
+	// double check Lock
+	q, ok = b.queues[name]
+	if ok {
+		return q
+	}
+
+	q = &Queue{
+		messages: list.New(),
+		waiters:  list.New(),
+	}
+	b.queues[name] = q
+	return q
 }
+
+// slice make garbage [1:] :)
 
 func main() {
 	defaultPort := "3000"
@@ -56,39 +74,67 @@ func main() {
 			return
 		}
 
-		ch := broker.getCreateQueue(queueName)
+		q := broker.getCreateQueue(queueName)
 
-		select {
-		case ch <- message:
+		q.mu.Lock()
+
+		if q.waiters.Len() > 0 {
+			frontElement := q.waiters.Front()
+			ch := frontElement.Value.(chan string)
+			q.waiters.Remove(frontElement)
+			q.mu.Unlock()
+
+			ch <- message
 			w.WriteHeader(http.StatusOK)
-		default:
-			http.Error(w, "queue is full", http.StatusServiceUnavailable)
+			return
 		}
+		if q.messages.Len() >= 10000 {
+			q.mu.Unlock()
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		q.messages.PushBack(message)
+		q.mu.Unlock()
 	})
 	mux.HandleFunc("GET /{queue}", func(w http.ResponseWriter, r *http.Request) {
 		queueName := r.PathValue("queue")
 		timeoutValue := r.FormValue("timeout")
 
-		ch := broker.getCreateQueue(queueName)
-
 		if timeoutValue == "" {
-			select {
-			case message := <-ch:
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(message))
-			default:
-				w.WriteHeader(http.StatusNotFound)
-			}
-			return
+			timeoutValue = "0"
 		}
 
 		timeout, err := strconv.Atoi(timeoutValue)
 		if err != nil {
-			slog.Error("convert", "err", err)
 			http.Error(w, "invalid timeout", http.StatusBadRequest)
 			return
 		}
+
+		q := broker.getCreateQueue(queueName)
+
+		q.mu.Lock()
+
+		if q.messages.Len() > 0 {
+			frontElement := q.messages.Front()
+			message := frontElement.Value.(string)
+			q.messages.Remove(frontElement)
+			q.mu.Unlock()
+
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(message))
+			return
+		}
+
+		if timeout <= 0 {
+			q.mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		ch := make(chan string, 1)
+		elem := q.waiters.PushBack(ch)
+		q.mu.Unlock()
 
 		ctx, cancel := context.WithTimeout(r.Context(), time.Duration(timeout)*time.Second)
 		defer cancel()
@@ -99,6 +145,10 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(message))
 		case <-ctx.Done():
+			q.mu.Lock()
+			q.waiters.Remove(elem)
+			q.mu.Unlock()
+
 			w.WriteHeader(http.StatusNotFound)
 		}
 
