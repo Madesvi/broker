@@ -5,20 +5,32 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 )
 
-func putMessageToBroker(w http.ResponseWriter, r *http.Request) {
-	queue := r.PathValue("queue")
-	message := r.FormValue("v")
+type Broker struct {
+	mu     sync.RWMutex
+	queues map[string]chan string
+}
 
-	slog.Info("Path", "value", queue)
+func NewBroker() *Broker {
+	return &Broker{queues: make(map[string]chan string)}
+}
 
-	if message == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
+func (b *Broker) getCreateQueue(name string) chan string {
+	b.mu.RLock()
+	ch, ok := b.queues[name] // check exists channel
+	b.mu.RUnlock()
+	if ok {
+		return ch
 	}
 
-	w.WriteHeader(http.StatusOK)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	ch = make(chan string, 100) // for example 100
+	b.queues[name] = ch
+	return ch
 }
 
 func getMessageFromBroker(w http.ResponseWriter, r *http.Request) {
@@ -37,8 +49,29 @@ func main() {
 
 	port := ":" + *portFlag
 
+	broker := NewBroker()
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /{queue}", putMessageToBroker)
+	mux.HandleFunc("PUT /{queue}", func(w http.ResponseWriter, r *http.Request) {
+		queueName := r.PathValue("queue")
+		message := r.FormValue("v")
+
+		if message == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		ch := broker.getCreateQueue(queueName)
+		ch <- message
+
+		go func() {
+			for message := range ch {
+				fmt.Println(message)
+			}
+		}()
+
+		w.WriteHeader(http.StatusOK)
+	})
 	mux.HandleFunc("GET /{queue}", getMessageFromBroker)
 
 	fmt.Printf("Server starting on %s\n", port)
